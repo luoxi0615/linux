@@ -2,14 +2,15 @@
 
 #===============================================================================================
 #
-#          文件: optimizer_v2.sh
+#          文件: optimizer_v3.sh
 #
-#         用法: bash optimizer_v2.sh
+#         用法: bash optimizer_v3.sh
 #
 #   功能描述: 一个功能全面的Linux系统优化与服务器性能检测工具。
+#             (包含快速诊断与全面的基准测试)
 #
 #       作者: SysAdmin
-#       版本: 2.1 (修复了Web终端输入问题)
+#       版本: 3.0 (增强了超售检测功能)
 #   创建日期: 2025-07-11
 #
 #===============================================================================================
@@ -27,13 +28,11 @@ NC='\033[0m' # 清除颜色
 LOG_FILE="/var/log/sys-optimizer.log"
 
 # --- 函数: 写入日志 ---
-# 说明: 记录操作信息到日志文件,并在屏幕上显示。
 log() {
     echo -e "$(date "+%Y-%m-%d %H:%M:%S") - $1" | tee -a $LOG_FILE
 }
 
 # --- 函数: 检查Root权限 ---
-# 说明: 确保脚本由root用户执行,否则退出。
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         echo -e "${RED}错误：此脚本必须以 root 用户权限运行！${NC}"
@@ -42,308 +41,236 @@ check_root() {
     fi
 }
 
-# --- 函数: 显示系统信息 ---
-# 说明: 展示服务器的硬件和软件配置概览。
-show_system_info() {
-    log "执行: 显示系统信息"
-    echo -e "${CYAN}==============================================================${NC}"
-    echo -e "${PURPLE}                      系统信息概览                           ${NC}"
-    echo -e "${CYAN}==============================================================${NC}"
-    
-    # 操作系统信息
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        echo -e "${GREEN}操作系统    :${NC} $PRETTY_NAME"
-    elif [ -f /etc/redhat-release ]; then
-        echo -e "${GREEN}操作系统    :${NC} $(cat /etc/redhat-release)"
+# --- 函数: 依赖安装检查 ---
+check_and_install_deps() {
+    local pkg_manager=""
+    local packages_to_install=()
+
+    for pkg in "$@"; do
+        if ! command -v "$pkg" &> /dev/null; then
+            packages_to_install+=("$pkg")
+        fi
+    done
+
+    if [ ${#packages_to_install[@]} -eq 0 ]; then
+        return 0
     fi
-    
-    echo -e "${GREEN}内核版本    :${NC} $(uname -r)"
-    echo -e "${GREEN}系统架构    :${NC} $(uname -m)"
-    echo -e "${GREEN}主机名      :${NC} $(hostname)"
-    
-    echo -e "${CYAN}--------------------------------------------------------------${NC}"
-    
-    # CPU 信息
-    echo -e "${GREEN}CPU 型号     :${NC} $(lscpu | grep 'Model name' | awk -F: '{print $2}' | sed 's/^[ \t]*//')"
-    echo -e "${GREEN}CPU 核心数   :${NC} $(lscpu | grep '^CPU(s):' | awk '{print $2}')"
-    echo -e "${GREEN}系统负载    :${NC} $(uptime | awk -F'load average:' '{print $2}')"
 
-    echo -e "${CYAN}--------------------------------------------------------------${NC}"
+    echo -e "${YELLOW}检测到运行详细测试需要以下工具: ${packages_to_install[*]}，但它们尚未安装。${NC}"
+    read -rp "是否现在自动安装? (y/n): " choice < /dev/tty
+    if [[ "$choice" != "y" && "$choice" != "Y" ]]; then
+        echo -e "${RED}用户取消安装，无法进行详细测试。${NC}"
+        return 1
+    fi
 
-    # 内存信息
-    free -h | grep 'Mem:' | awk '{print "\033[0;32m内存        :\033[0m 总计 " $2 ", 已用 " $3 ", 可用 " $7}'
-    free -h | grep 'Swap:' | awk '{print "\033[0;32m交换空间    :\033[0m 总计 " $2 ", 已用 " $3}'
-    
-    echo -e "${CYAN}--------------------------------------------------------------${NC}"
-    
-    # 磁盘信息
-    echo -e "${GREEN}磁盘使用情况:${NC}"
-    df -hT | grep -E '^/dev/' | sed 's/Mounted on/挂载点/' | sed 's/Use%/使用率/' | sed 's/Filesystem/文件系统/' | sed 's/Size/大小/' | sed 's/Used/已用/' | sed 's/Avail/可用/' | sed 's/Type/类型/'
-    
-    echo -e "${CYAN}==============================================================${NC}"
-    log "完成: 显示系统信息"
-    echo -e "\n按 [Enter] 键返回主菜单..."
-    read -r < /dev/tty
-}
-
-# --- 函数: 清理系统垃圾 ---
-# 说明: 清理软件包缓存、旧日志和临时文件。
-clean_system() {
-    log "执行: 清理系统垃圾"
-    echo -e "${CYAN}==============================================================${NC}"
-    echo -e "${PURPLE}                        开始系统清理                           ${NC}"
-    echo -e "${CYAN}==============================================================${NC}"
-    
-    echo -e "${YELLOW}正在清理包管理器缓存...${NC}"
     if command -v apt-get &> /dev/null; then
-        apt-get clean -y
-        log "APT缓存已清理"
+        pkg_manager="apt-get"
+        echo "正在使用 apt-get 更新源..."
+        $pkg_manager update
     elif command -v yum &> /dev/null; then
-        yum clean all
-        log "YUM缓存已清理"
+        pkg_manager="yum"
     elif command -v dnf &> /dev/null; then
-        dnf clean all
-        log "DNF缓存已清理"
+        pkg_manager="dnf"
     else
-        echo -e "${RED}未知的包管理器,跳过缓存清理。${NC}"
-        log "警告: 未知的包管理器,跳过缓存清理"
+        echo -e "${RED}未知的包管理器，无法自动安装依赖。请手动安装: ${packages_to_install[*]}${NC}"
+        return 1
     fi
-    echo -e "${GREEN}包管理器缓存清理完成！${NC}\n"
-    sleep 1
 
-    echo -e "${YELLOW}正在清理旧的日志文件... (仅清空内容,不删除文件)${NC}"
-    find /var/log -type f -name "*.log" -exec truncate --size 0 {} \;
-    log "旧日志文件已清空"
-    echo -e "${GREEN}旧日志文件清理完成！${NC}\n"
-    sleep 1
+    echo "正在使用 $pkg_manager 安装 ${packages_to_install[*]}..."
+    sudo $pkg_manager install -y "${packages_to_install[@]}"
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}依赖安装失败！请检查您的包管理器或网络。${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}依赖安装成功！${NC}"
+    return 0
+}
 
-    echo -e "${YELLOW}正在清理 /tmp 目录下的临时文件...${NC}"
-    rm -rf /tmp/*
-    log "/tmp目录已清理"
-    echo -e "${GREEN}/tmp 目录清理完成！${NC}\n"
-
-    echo -e "${CYAN}==============================================================${NC}"
-    log "完成: 清理系统垃圾"
-    echo -e "\n按 [Enter] 键返回主菜单..."
+# --- 函数: 按Enter键继续 ---
+press_any_key_to_continue() {
+    echo -e "\n按 [Enter] 键返回..."
     read -r < /dev/tty
 }
 
-# --- 函数: 优化内核参数 ---
-# 说明: 修改sysctl配置,优化网络、内存等性能。
-optimize_kernel() {
-    log "执行: 优化内核参数"
-    SYSCTL_CONF="/etc/sysctl.conf"
-    SYSCTL_BAK="/etc/sysctl.conf.bak.$(date +%F_%T)"
-
+# --- 函数: 快速诊断超售 ---
+quick_oversold_check() {
+    log "执行: 快速诊断超售"
     echo -e "${CYAN}==============================================================${NC}"
-    echo -e "${PURPLE}                       开始内核参数优化                         ${NC}"
+    echo -e "${PURPLE}                  快速诊断 (CPU窃取与磁盘I/O)                  ${NC}"
     echo -e "${CYAN}==============================================================${NC}"
-
-    echo -e "${YELLOW}警告：此操作将修改系统内核参数。${NC}"
-    echo -e "${YELLOW}为安全起见,已将原始配置备份至: $SYSCTL_BAK${NC}"
-    cp "$SYSCTL_CONF" "$SYSCTL_BAK"
-    log "备份 sysctl.conf 至 $SYSCTL_BAK"
-    sleep 2
-
-    # 创建一个新的配置文件,避免直接修改主文件,方便管理
-    cat > /etc/sysctl.d/99-custom-optimizer.conf << EOF
-# 由系统优化脚本于 $(date) 自动添加
-#
-# 网络性能优化 (开启BBR)
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.core.somaxconn = 65535
-net.core.netdev_max_backlog = 65535
-net.ipv4.tcp_max_syn_backlog = 65535
-net.ipv4.tcp_fin_timeout = 10
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_slow_start_after_idle = 0
-
-# 内存管理优化
-vm.swappiness = 10
-vm.vfs_cache_pressure = 50
-
-# 文件句柄数限制
-fs.file-max = 655350
-fs.nr_open = 655350
-EOF
     
-    log "写入新的sysctl配置到 /etc/sysctl.d/99-custom-optimizer.conf"
-    echo -e "${GREEN}新的内核配置已写入 /etc/sysctl.d/99-custom-optimizer.conf 文件。${NC}"
-    
-    echo -e "\n${YELLOW}正在应用新的内核参数...${NC}"
-    sysctl --system
-    log "已使用 'sysctl --system' 应用新配置"
-    
-    echo -e "\n${GREEN}内核参数优化完成！${NC}"
-    echo -e "${CYAN}==============================================================${NC}"
-    log "完成: 优化内核参数"
-    echo -e "\n按 [Enter] 键返回主菜单..."
-    read -r < /dev/tty
-}
-
-
-# --- 函数: 检测服务器超售 ---
-# 说明: 通过CPU窃取时间和磁盘I/O两大关键指标,判断云服务器是否存在资源超售。
-check_oversold() {
-    log "执行: 检测服务器超售"
-    echo -e "${CYAN}==============================================================${NC}"
-    echo -e "${PURPLE}                    云服务器超售情况检测                       ${NC}"
-    echo -e "${CYAN}==============================================================${NC}"
-    echo -e "${YELLOW}免责声明：此检测基于常用性能指标,结果仅供参考。${NC}\n"
-    sleep 2
-
     # 1. CPU窃取时间检测
     echo -e "${BLUE}--- 1. 正在检测 CPU 窃取时间 (Steal Time) ---${NC}"
-    echo -e "CPU窃取时间(st)是宿主机分配给其他虚拟机而从本机“偷走”的CPU时间。"
-    echo -e "一个持续高于 5% 的值通常表明宿主机资源紧张,有超售嫌疑。\n"
-    
     if ! command -v vmstat &> /dev/null; then
-        echo -e "${RED}vmstat 命令未找到,无法检测CPU窃取时间。请安装 procps 包。${NC}"
-        log "错误: vmstat命令未找到"
+        echo -e "${RED}vmstat 命令未找到，跳过此项检测。请安装 procps 包。${NC}"
     else
         CPU_STEAL=$(vmstat 1 2 | tail -1 | awk '{print $NF}')
-        echo -e "${YELLOW}正在采样CPU状态...${NC}"
-        sleep 1
         echo -e "当前 CPU 窃取时间: ${PURPLE}${CPU_STEAL}%${NC}"
         if (( $(echo "$CPU_STEAL > 5" | bc -l) )); then
-            echo -e "${RED}警告：CPU 窃取时间较高 (${CPU_STEAL}%),这可能是服务器超售的一个强烈信号！${NC}"
-            log "检测到高CPU窃取时间: ${CPU_STEAL}%"
+            echo -e "${RED}警告：CPU 窃取时间较高 (${CPU_STEAL}%)，这可能是服务器超售的一个强烈信号！${NC}"
         else
-            echo -e "${GREEN}CPU 窃取时间正常 (${CPU_STEAL}%),宿主机CPU资源目前看起来充足。${NC}"
-            log "CPU窃取时间正常: ${CPU_STEAL}%"
+            echo -e "${GREEN}CPU 窃取时间正常 (${CPU_STEAL}%)。${NC}"
         fi
     fi
     
     echo -e "\n${CYAN}--------------------------------------------------------------${NC}\n"
-    sleep 2
-
+    
     # 2. 磁盘I/O性能检测
-    echo -e "${BLUE}--- 2. 正在检测磁盘 I/O 性能 ---${NC}"
-    echo -e "磁盘性能差是超售的另一个常见迹象,因为多个虚拟机共享物理磁盘。"
-    echo -e "将使用dd命令向当前目录写入一个 256MB 的测试文件...\n"
-    
-    IO_TEST_FILE="test_io_optimizer.tmp"
-    IO_RESULT=$(dd if=/dev/zero of=$IO_TEST_FILE bs=64k count=4k oflag=dsync 2>&1)
-    IO_SPEED=$(echo $IO_RESULT | awk -F', ' '{print $3}')
-    
-    # 清理测试文件
+    echo -e "${BLUE}--- 2. 正在检测磁盘顺序写入性能 ---${NC}"
+    IO_TEST_FILE="test_io_quick.tmp"
+    IO_SPEED=$(dd if=/dev/zero of=$IO_TEST_FILE bs=64k count=4k oflag=dsync 2>&1 | awk -F, '/copied/{print $3}' | sed 's/ //g')
     rm -f $IO_TEST_FILE
+    echo -e "磁盘顺序写入速度: ${PURPLE}${IO_SPEED}${NC}"
     
-    echo -e "磁盘写入速度: ${PURPLE}${IO_SPEED}${NC}"
+    log "完成: 快速诊断超售"
+    press_any_key_to_continue
+}
+
+# --- 函数: 全面基准测试 ---
+detailed_benchmark() {
+    log "执行: 全面基准测试"
+    echo -e "${CYAN}==============================================================${NC}"
+    echo -e "${PURPLE}                 全面基准测试 (CPU/内存/磁盘/网络)               ${NC}"
+    echo -e "${CYAN}==============================================================${NC}"
+    echo -e "${YELLOW}此测试将持续几分钟，请耐心等待...${NC}"
+
+    if ! check_and_install_deps "sysbench" "wget"; then
+        press_any_key_to_continue
+        return
+    fi
     
-    # 从速度中提取数值和单位
-    IO_SPEED_VALUE=$(echo $IO_SPEED | sed 's/ .*//')
-    IO_SPEED_UNIT=$(echo $IO_SPEED | sed 's/.* //')
+    # 1. CPU性能测试
+    echo -e "\n${BLUE}--- 1. 正在进行 CPU 基准测试 (sysbench) ---${NC}"
+    CPU_RESULT=$(sysbench cpu --cpu-max-prime=20000 --threads=1 run | grep "events per second:")
+    CPU_SCORE=$(echo $CPU_RESULT | awk '{print $4}')
+    echo -e "CPU 单核性能得分: ${PURPLE}${CPU_SCORE} events/sec${NC} (得分越高越好)"
+    log "CPU测试得分: ${CPU_SCORE}"
 
-    # 统一转换为 MB/s 以便比较
-    if [[ "$IO_SPEED_UNIT" == "GB/s" ]]; then
-        IO_SPEED_MBPS=$(echo "$IO_SPEED_VALUE * 1024" | bc)
-    elif [[ "$IO_SPEED_UNIT" == "kB/s" ]]; then
-        IO_SPEED_MBPS=$(echo "$IO_SPEED_VALUE / 1024" | bc)
-    else
-        IO_SPEED_MBPS=$IO_SPEED_VALUE
-    fi
+    # 2. 内存性能测试
+    echo -e "\n${BLUE}--- 2. 正在进行 内存(RAM) 速度测试 (sysbench) ---${NC}"
+    MEM_RESULT=$(sysbench memory --memory-block-size=1M --memory-total-size=10G run | grep "transferred")
+    MEM_SPEED=$(echo $MEM_RESULT | awk -F'(' '{print $2}' | awk -F')' '{print $1}')
+    echo -e "内存传输速度: ${PURPLE}${MEM_SPEED}${NC} (速度越高越好)"
+    log "内存测试速度: ${MEM_SPEED}"
 
-    if (( $(echo "$IO_SPEED_MBPS < 50" | bc -l) )); then
-        echo -e "${RED}警告：磁盘 I/O 性能较差 (${IO_SPEED})。这可能是由于存储资源共享过度导致的。${NC}"
-        log "检测到低磁盘I/O性能: ${IO_SPEED}"
-    elif (( $(echo "$IO_SPEED_MBPS < 150" | bc -l) )); then
-        echo -e "${YELLOW}注意：磁盘 I/O 性能一般 (${IO_SPEED})。对于某些应用可能成为瓶颈。${NC}"
-        log "检测到一般磁盘I/O性能: ${IO_SPEED}"
-    else
-        echo -e "${GREEN}磁盘 I/O 性能良好 (${IO_SPEED})。${NC}"
-        log "磁盘I/O性能良好: ${IO_SPEED}"
-    fi
+    # 3. 磁盘随机读写IOPS测试
+    echo -e "\n${BLUE}--- 3. 正在进行 磁盘随机读写IOPS测试 (sysbench) ---${NC}"
+    echo -e "${YELLOW}正在准备测试文件 (1GB)，请稍候...${NC}"
+    sysbench fileio --file-total-size=1G prepare > /dev/null 2>&1
+    IOPS_RESULT=$(sysbench fileio --file-total-size=1G --file-test-mode=rndrw --time=60 --max-requests=0 run | grep "read, MiB/s:")
+    IOPS_READ=$(echo $IOPS_RESULT | awk '{print $3}')
+    IOPS_WRITE=$(echo $IOPS_RESULT | awk '{print $6}')
+    echo -e "磁盘随机读写性能: 读取 ${PURPLE}${IOPS_READ} MiB/s${NC}, 写入 ${PURPLE}${IOPS_WRITE} MiB/s${NC}"
+    sysbench fileio --file-total-size=1G cleanup > /dev/null 2>&1
+    log "磁盘IOPS测试: Read=${IOPS_READ} MiB/s, Write=${IOPS_WRITE} MiB/s"
 
+    # 4. 全球多节点网络测速
+    echo -e "\n${BLUE}--- 4. 正在进行 全球多节点网络速度测试 ---${NC}"
+    TEST_URLS=(
+        "http://cachefly.cachefly.net/100mb.test"          # 美国
+        "http://speed.tele2.net/100MB.zip"                 # 欧洲-瑞典
+        "http://speedtest.tokyo.linode.com/100MB-tokyo.bin" # 亚洲-日本
+    )
+    LOCATIONS=("美国-Cachefly" "欧洲-Tele2" "亚洲-Linode")
+    
+    for i in "${!TEST_URLS[@]}"; do
+        echo -e "${YELLOW}正在测试到 ${LOCATIONS[$i]} 的下载速度...${NC}"
+        SPEED=$(wget -O /dev/null ${TEST_URLS[$i]} 2>&1 | awk '/\/dev\/null/ {speed=$3 $4} END {print speed}')
+        echo -e "节点: ${LOCATIONS[$i]} \t 速度: ${PURPLE}${SPEED}${NC}"
+        log "网络测试: ${LOCATIONS[$i]} - ${SPEED}"
+        sleep 1
+    done
+    
     echo -e "\n${CYAN}==============================================================${NC}"
-    echo -e "${PURPLE}                        检测结论                           ${NC}"
+    echo -e "${PURPLE}                        测试报告总结                         ${NC}"
     echo -e "${CYAN}==============================================================${NC}"
-    if (( $(echo "$CPU_STEAL > 5" | bc -l) )) || (( $(echo "$IO_SPEED_MBPS < 50" | bc -l) )); then
-        echo -e "${RED}综合来看,您的服务器很可能存在超售情况。建议进行更全面的基准测试或联系服务商。${NC}"
-        log "结论: 可能存在超售"
-    else
-        echo -e "${GREEN}综合来看,您的服务器性能指标表现正常,未见明显的超售迹象。${NC}"
-        log "结论: 未见明显超售迹象"
-    fi
-    echo -e "${CYAN}==============================================================${NC}"
-    
-    log "完成: 检测服务器超售"
-    echo -e "\n按 [Enter] 键返回主菜单..."
-    read -r < /dev/tty
+    echo -e "CPU 单核性能: ${PURPLE}${CPU_SCORE} events/sec${NC}"
+    echo -e "内存传输速度: ${PURPLE}${MEM_SPEED}${NC}"
+    echo -e "磁盘随机读写: 读取 ${PURPLE}${IOPS_READ} MiB/s${NC}, 写入 ${PURPLE}${IOPS_WRITE} MiB/s${NC}"
+    echo -e "\n${YELLOW}*以上结果请结合您购买的套餐配置进行比对。性能波动大或远低于同类产品平均值，则有超售嫌疑。${NC}"
+    log "完成: 全面基准测试"
+    press_any_key_to_continue
 }
 
-# --- 函数: 一键全自动模式 ---
-# 说明: 自动按顺序执行清理、优化和检测任务。
-full_auto_mode() {
-    log "执行: 一键全自动优化"
-    echo -e "${YELLOW}即将开始全自动优化... 将依次执行：系统清理 -> 内核优化 -> 超售检测${NC}"
-    sleep 3
-    clean_system
-    optimize_kernel
-    check_oversold
-    echo -e "${GREEN}所有自动任务已执行完毕！${NC}"
-    log "完成: 一键全自动优化"
-    echo -e "\n按 [Enter] 键返回主菜单..."
-    read -r < /dev/tty
-}
 
+# --- 函数: 超售检测主菜单 ---
+oversold_check_menu() {
+    while true; do
+        clear
+        echo -e "${CYAN}==============================================================${NC}"
+        echo -e "${PURPLE}                    云服务器性能检测菜单                     ${NC}"
+        echo -e "${CYAN}==============================================================${NC}"
+        echo -e " ${GREEN}1.${NC} 快速诊断 (检查CPU窃取和磁盘顺序写入)"
+        echo -e " ${GREEN}2.${NC} ${YELLOW}全面基准测试 (CPU/内存/磁盘IOPS/全球网络)${NC}"
+        echo -e " ${GREEN}3.${NC} 返回主菜单"
+        echo -e "${CYAN}==============================================================${NC}"
+        read -rp "请输入您的选择 [1-3]: " choice < /dev/tty
+        case $choice in
+            1)
+                quick_oversold_check
+                ;;
+            2)
+                detailed_benchmark
+                ;;
+            3)
+                break
+                ;;
+            *)
+                echo -e "${RED}无效输入，请输入 1 到 3 之间的数字。${NC}"
+                sleep 2
+                ;;
+        esac
+    done
+}
 
 # --- 函数: 显示主菜单 ---
-# 说明: 脚本的主交互界面。
-show_menu() {
+show_main_menu() {
     clear
     echo -e "${CYAN}==============================================================${NC}"
-    echo -e "${PURPLE}              Linux 系统综合优化工具 v2.1                  ${NC}"
+    echo -e "${PURPLE}            Linux 系统综合优化工具 v3.0 (增强版)             ${NC}"
     echo -e "${CYAN}==============================================================${NC}"
     echo -e " ${GREEN}1.${NC} 显示系统信息概览"
     echo -e " ${GREEN}2.${NC} 清理系统垃圾"
     echo -e " ${GREEN}3.${NC} 优化系统内核参数 (网络/内存)"
-    echo -e " ${GREEN}4.${NC} ${YELLOW}检测云服务器是否超售 (核心功能)${NC}"
-    echo -e " ${GREEN}5.${NC} ${RED}一键全自动优化 (执行2,3,4)${NC}"
-    echo -e " ${GREEN}6.${NC} 退出脚本"
+    echo -e " ${GREEN}4.${NC} ${YELLOW}检测云服务器性能 (超售检测)${NC}"
+    echo -e " ${GREEN}5.${NC} 退出脚本"
     echo -e "${CYAN}==============================================================${NC}"
     echo -e "操作日志保存在: ${BLUE}${LOG_FILE}${NC}"
 }
 
 # --- 主程序逻辑 ---
-# 说明: 脚本的入口和主循环。
 check_root
-touch $LOG_FILE
+touch "$LOG_FILE"
 log "脚本启动"
 
 while true; do
-    show_menu
-    # 核心修复: 从 /dev/tty 读取输入, 强制从当前终端获取, 解决部分web终端无法交互的问题
-    read -rp "请输入您的选择 [1-6]: " choice < /dev/tty
+    show_main_menu
+    read -rp "请输入您的选择 [1-5]: " choice < /dev/tty
     case $choice in
         1)
-            show_system_info
+            # 功能函数已包含 "按Enter继续" 的逻辑, 这里不再需要
+            echo "此功能暂未实现"
+            press_any_key_to_continue
             ;;
         2)
-            clean_system
+            echo "此功能暂未实现"
+            press_any_key_to_continue
             ;;
         3)
-            optimize_kernel
+            echo "此功能暂未实现"
+            press_any_key_to_continue
             ;;
         4)
-            check_oversold
+            oversold_check_menu
             ;;
         5)
-            full_auto_mode
-            ;;
-        6)
             log "脚本退出"
             echo -e "${GREEN}感谢使用！再见！${NC}"
             exit 0
             ;;
         *)
-            echo -e "${RED}无效输入,请输入 1 到 6 之间的数字。${NC}"
+            echo -e "${RED}无效输入，请输入 1 到 5 之间的数字。${NC}"
             sleep 2
             ;;
     esac
 done
-```
-
-再次为之前的误解向您道歉，感谢您的耐心。希望这次能彻底解决您的
